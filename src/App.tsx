@@ -13,13 +13,33 @@ import {
   Volume2,
   VolumeX,
   Music,
-  Music2
+  Music2,
+  RefreshCw
 } from 'lucide-react';
 import { QUESTIONS } from './data/questions';
 import { Question, Team, GameState } from './types';
 
 const CATEGORIES_COUNT = 12;
-const PRIZE_MONEY = 500;
+
+const getPrizeMoney = (round: number) => {
+  if (round <= 2) return 500;
+  if (round <= 4) return 1000;
+  if (round <= 6) return 1500;
+  if (round <= 8) return 2000;
+  return 2500;
+};
+
+const getCurrentLevel = (round: number, isHardMode: boolean) => {
+  if (isHardMode) {
+    if (round <= 2) return 2;
+    if (round <= 5) return 3;
+    return 4;
+  }
+  if (round <= 2) return 1;
+  if (round <= 4) return 2;
+  if (round <= 7) return 3;
+  return 4;
+};
 
 const SOUNDS = {
   background: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3',
@@ -44,6 +64,7 @@ export default function App() {
   const [finalBets, setFinalBets] = useState<number[]>([]);
   const [finalAnswers, setFinalAnswers] = useState<number[]>([]);
   const [finalQuestion, setFinalQuestion] = useState<Question | null>(null);
+  const [isHardMode, setIsHardMode] = useState(false);
   
   // Audio state
   const [isMuted, setIsMuted] = useState(false);
@@ -83,11 +104,17 @@ export default function App() {
   };
 
   // Initialize game with random categories
-  const startNewGame = (teamConfigs: { name: string, difficulty: 'adult' | 'child' }[]) => {
+  const startNewGame = (teamConfigs: { name: string, difficulty: 'adult' | 'child' }[], hardMode: boolean) => {
     playSound(SOUNDS.click);
+    setIsHardMode(hardMode);
     
-    // Get all unique categories
-    const allCategories = Array.from(new Set(QUESTIONS.map(q => q.category)));
+    // Get all unique categories that have questions for all difficulties present in the game
+    const currentDifficulties = Array.from(new Set(teamConfigs.map(c => c.difficulty)));
+    const allCategories = Array.from(new Set(QUESTIONS.map(q => q.category))).filter(cat => 
+      currentDifficulties.every(diff => 
+        QUESTIONS.some(q => q.category === cat && q.difficulty === diff)
+      )
+    );
     const shuffledCats = allCategories.sort(() => 0.5 - Math.random());
     const selected = shuffledCats.slice(0, CATEGORIES_COUNT);
     
@@ -109,16 +136,27 @@ export default function App() {
     playSound(SOUNDS.click);
 
     const currentTeam = teams[currentTeamIndex];
+    const round = usedCategories.size + 1;
+    const level = getCurrentLevel(round, isHardMode);
     
-    // Find a question for this category and difficulty that hasn't been used
+    // Find a question for this category, difficulty and level that hasn't been used
     let question = QUESTIONS.find(q => 
       q.category === category && 
       q.difficulty === currentTeam.difficulty && 
+      q.level === level &&
       !usedQuestionIds.has(q.id)
     );
 
-    // Fallback: if no specific difficulty question exists for this category, 
-    // try any difficulty for this category
+    // Fallback 1: any level for this category but same difficulty
+    if (!question) {
+      question = QUESTIONS.find(q => 
+        q.category === category && 
+        q.difficulty === currentTeam.difficulty && 
+        !usedQuestionIds.has(q.id)
+      );
+    }
+
+    // Fallback 2: any level/difficulty for this category (last resort)
     if (!question) {
       question = QUESTIONS.find(q => 
         q.category === category && 
@@ -143,6 +181,60 @@ export default function App() {
     setJokerResult(null);
   };
 
+  const shuffleCategories = () => {
+    playSound(SOUNDS.click);
+    const currentDifficulties = Array.from(new Set(teams.map(t => t.difficulty)));
+    const allCategories = Array.from(new Set(QUESTIONS.map(q => q.category))).filter(cat => 
+      currentDifficulties.every(diff => 
+        QUESTIONS.some(q => q.category === cat && q.difficulty === diff)
+      )
+    );
+    // Categories not currently on the board and not used
+    const pool = allCategories.filter(cat => !selectedCategories.includes(cat) && !usedCategories.has(cat));
+    
+    if (pool.length === 0) return;
+
+    const shuffledPool = [...pool].sort(() => Math.random() - 0.5);
+    
+    setSelectedCategories(prev => {
+      let poolIndex = 0;
+      return prev.map(cat => {
+        if (!usedCategories.has(cat) && poolIndex < shuffledPool.length) {
+          return shuffledPool[poolIndex++];
+        }
+        return cat;
+      });
+    });
+  };
+
+  const swapQuestion = () => {
+    if (!currentQuestion) return;
+    playSound(SOUNDS.click);
+    
+    const possibleQuestions = QUESTIONS.filter(q => 
+      q.category === currentQuestion.category && 
+      q.difficulty === currentQuestion.difficulty && 
+      q.level === currentQuestion.level &&
+      q.id !== currentQuestion.id
+    );
+
+    if (possibleQuestions.length > 0) {
+      const nextQ = possibleQuestions[Math.floor(Math.random() * possibleQuestions.length)];
+      setCurrentQuestion(nextQ);
+    } else {
+      // Fallback: any question of same difficulty in this category
+      const fallbackQuestions = QUESTIONS.filter(q => 
+        q.category === currentQuestion.category && 
+        q.difficulty === currentQuestion.difficulty &&
+        q.id !== currentQuestion.id
+      );
+      if (fallbackQuestions.length > 0) {
+        const nextQ = fallbackQuestions[Math.floor(Math.random() * fallbackQuestions.length)];
+        setCurrentQuestion(nextQ);
+      }
+    }
+  };
+
   const handleAnswer = (optionIndex: number) => {
     if (selectedOption !== null) return;
     setSelectedOption(optionIndex);
@@ -152,7 +244,8 @@ export default function App() {
     if (isCorrect) {
       playSound(SOUNDS.correct);
       const newTeams = [...teams];
-      newTeams[currentTeamIndex].score += PRIZE_MONEY;
+      const round = usedCategories.size; // usedCategories already includes current
+      newTeams[currentTeamIndex].score += getPrizeMoney(round);
       setTeams(newTeams);
     } else {
       playSound(SOUNDS.incorrect);
@@ -181,21 +274,27 @@ export default function App() {
     setJokerActive(true);
     // Simulate audience results: higher probability for correct answer
     const correct = currentQuestion.correctIndex;
-    const results = [0, 0, 0];
-    results[correct] = Math.floor(Math.random() * 40) + 40; // 40-80%
-    const remaining = 100 - results[correct];
-    const other1 = Math.floor(Math.random() * remaining);
-    const other2 = remaining - other1;
+    const numOptions = currentQuestion.options.length;
+    const results = new Array(numOptions).fill(0);
     
-    const finalResults = [...results];
-    let otherIdx = 0;
-    for (let i = 0; i < 3; i++) {
-      if (i !== correct) {
-        finalResults[i] = otherIdx === 0 ? other1 : other2;
-        otherIdx++;
+    // Correct answer gets 40-70%
+    results[correct] = Math.floor(Math.random() * 30) + 40;
+    
+    let remaining = 100 - results[correct];
+    const otherIndices = Array.from({ length: numOptions }, (_, i) => i).filter(i => i !== correct);
+    
+    // Distribute remaining percentage among other options
+    for (let i = 0; i < otherIndices.length; i++) {
+      if (i === otherIndices.length - 1) {
+        results[otherIndices[i]] = remaining;
+      } else {
+        const val = Math.floor(Math.random() * (remaining / 1.5));
+        results[otherIndices[i]] = val;
+        remaining -= val;
       }
     }
-    setJokerResult(finalResults);
+    
+    setJokerResult(results);
   };
 
   const prepareFinal = () => {
@@ -241,20 +340,37 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0a192f] text-white font-sans selection:bg-yellow-400 selection:text-black">
-      <header className="bg-[#112240] border-b border-blue-900/50 p-6 sticky top-0 z-50 shadow-xl">
-        <div className="max-w-7xl mx-auto flex justify-between items-center">
-          <div className="flex items-center gap-3">
-            <div className="bg-yellow-500 p-2 rounded-lg shadow-lg shadow-yellow-500/20">
-              <HelpCircle className="w-8 h-8 text-black" />
+      <header className="bg-[#112240] border-b border-blue-900/50 p-3 md:p-4 sticky top-0 z-50 shadow-xl">
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-3">
+          <div className="flex items-center gap-2 md:gap-3 w-full md:w-auto justify-between md:justify-start">
+            <div className="flex items-center gap-2">
+              <div className="bg-yellow-500 p-1.5 md:p-2 rounded-lg shadow-lg shadow-yellow-500/20">
+                <HelpCircle className="w-5 h-5 md:w-8 md:h-8 text-black" />
+              </div>
+              <div>
+                <h1 className="text-lg md:text-2xl font-bold tracking-tight text-yellow-500 leading-none">WER WEISS DENN SOWAS?</h1>
+                <p className="text-[10px] md:text-xs text-blue-300 font-mono uppercase tracking-widest">Das interaktive Quiz</p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-2xl font-bold tracking-tight text-yellow-500">WER WEISS DENN SOWAS?</h1>
-              <p className="text-xs text-blue-300 font-mono uppercase tracking-widest">Das interaktive Quiz</p>
+            
+            <div className="flex md:hidden items-center gap-2 bg-blue-900/30 p-1 rounded-lg border border-blue-800/50">
+              <button 
+                onClick={() => setIsMusicEnabled(!isMusicEnabled)}
+                className={`p-1.5 rounded-md transition-all ${isMusicEnabled ? 'text-yellow-500 bg-blue-900/50' : 'text-gray-500'}`}
+              >
+                {isMusicEnabled ? <Music className="w-4 h-4" /> : <Music2 className="w-4 h-4" />}
+              </button>
+              <button 
+                onClick={() => setIsMuted(!isMuted)}
+                className={`p-1.5 rounded-md transition-all ${!isMuted ? 'text-yellow-500 bg-blue-900/50' : 'text-gray-500'}`}
+              >
+                {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+              </button>
             </div>
           </div>
           
-          <div className="flex items-center gap-6">
-            <div className="flex items-center gap-2 bg-blue-900/30 p-1 rounded-lg border border-blue-800/50">
+          <div className="flex items-center gap-4 md:gap-6 w-full md:w-auto overflow-x-auto no-scrollbar pb-1 md:pb-0">
+            <div className="hidden md:flex items-center gap-2 bg-blue-900/30 p-1 rounded-lg border border-blue-800/50">
               <button 
                 onClick={() => setIsMusicEnabled(!isMusicEnabled)}
                 className={`p-2 rounded-md transition-all ${isMusicEnabled ? 'text-yellow-500 bg-blue-900/50' : 'text-gray-500'}`}
@@ -272,14 +388,14 @@ export default function App() {
             </div>
 
             {gameState !== 'setup' && (
-              <div className="flex gap-6 border-l border-blue-900/50 pl-6">
+              <div className="flex gap-4 md:gap-6 md:border-l border-blue-900/50 md:pl-6 w-full justify-around md:justify-end">
                 {teams.map((team, idx) => (
-                  <div key={idx} className={`flex flex-col items-end transition-all duration-300 ${idx === currentTeamIndex && gameState === 'playing' ? 'scale-110' : 'opacity-70'}`}>
-                    <div className="flex items-center gap-2">
-                      {team.difficulty === 'child' && <span className="text-[10px] bg-green-500/20 text-green-400 px-1 rounded border border-green-500/30">KIND</span>}
-                      <span className="text-xs font-mono text-blue-300 uppercase">{team.name}</span>
+                  <div key={idx} className={`flex flex-col items-center md:items-end transition-all duration-300 ${idx === currentTeamIndex && gameState === 'playing' ? 'scale-105 md:scale-110' : 'opacity-60 md:opacity-70'}`}>
+                    <div className="flex items-center gap-1 md:gap-2">
+                      {team.difficulty === 'child' && <span className="text-[8px] md:text-[10px] bg-green-500/20 text-green-400 px-1 rounded border border-green-500/30">KIND</span>}
+                      <span className="text-[10px] md:text-xs font-mono text-blue-300 uppercase whitespace-nowrap">{team.name}</span>
                     </div>
-                    <span className="text-xl font-bold text-yellow-400">{team.score.toLocaleString()} €</span>
+                    <span className="text-sm md:text-xl font-bold text-yellow-400">{team.score.toLocaleString()} €</span>
                   </div>
                 ))}
               </div>
@@ -288,7 +404,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto p-8">
+      <main className="max-w-7xl mx-auto p-4 md:p-8">
         <AnimatePresence mode="wait">
           {gameState === 'setup' && (
             <motion.div 
@@ -311,16 +427,28 @@ export default function App() {
             <motion.div 
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-4"
+              className="space-y-4 md:space-y-6"
             >
-              {selectedCategories.map((cat, idx) => (
-                <CategoryCard 
-                  key={idx} 
-                  category={cat} 
-                  isUsed={usedCategories.has(cat)}
-                  onClick={() => handleSelectCategory(cat)}
-                />
-              ))}
+              <div className="flex justify-between items-center">
+                <h2 className="text-xl md:text-2xl font-black text-blue-400">KATEGORIE WÄHLEN</h2>
+                <button 
+                  onClick={shuffleCategories}
+                  className="flex items-center gap-2 px-3 py-1.5 md:px-4 md:py-2 rounded-xl bg-blue-900/30 border border-blue-800 text-blue-300 hover:bg-blue-800 transition-all text-xs md:text-sm font-bold"
+                >
+                  <RotateCcw className="w-4 h-4" /> Kategorien neu mischen
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-4">
+                {selectedCategories.map((cat, idx) => (
+                  <CategoryCard 
+                    key={idx} 
+                    category={cat} 
+                    isUsed={usedCategories.has(cat)}
+                    onClick={() => handleSelectCategory(cat)}
+                  />
+                ))}
+              </div>
             </motion.div>
           )}
 
@@ -342,12 +470,34 @@ export default function App() {
 
                 <div className="flex flex-col md:flex-row justify-between items-start gap-4 mb-6 md:mb-8">
                   <div className="flex flex-col gap-1">
-                    <span className="bg-blue-900/50 text-blue-300 px-3 md:px-4 py-1 rounded-full text-xs md:text-sm font-mono uppercase tracking-wider w-fit">
-                      {currentQuestion.category}
-                    </span>
-                    <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded border w-fit ${currentQuestion.difficulty === 'child' ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-blue-500/10 text-blue-400 border-blue-500/20'}`}>
-                      {currentQuestion.difficulty === 'child' ? 'Kinderfrage' : 'Erwachsenenfrage'}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="bg-blue-900/50 text-blue-300 px-3 md:px-4 py-1 rounded-full text-xs md:text-sm font-mono uppercase tracking-wider w-fit">
+                        {currentQuestion.category}
+                      </span>
+                      <span className="bg-yellow-500/20 text-yellow-500 px-2 py-1 rounded-full text-[10px] font-bold border border-yellow-500/30">
+                        {getPrizeMoney(usedCategories.size)} €
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded border w-fit ${currentQuestion.difficulty === 'child' ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-blue-500/10 text-blue-400 border-blue-500/20'}`}>
+                        {currentQuestion.difficulty === 'child' ? 'Kinderfrage' : 'Erwachsenenfrage'}
+                      </span>
+                      <span className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border ${
+                        currentQuestion.level === 4 
+                          ? 'bg-red-500/20 text-red-400 border-red-500/30 animate-pulse' 
+                          : 'text-blue-400 border-blue-500/20'
+                      }`}>
+                        Stufe {currentQuestion.level}
+                      </span>
+                      <button 
+                        onClick={swapQuestion}
+                        disabled={selectedOption !== null}
+                        className="flex items-center gap-1 bg-blue-900/30 hover:bg-blue-800/50 text-blue-400 px-2 py-0.5 rounded border border-blue-500/20 text-[10px] font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Frage tauschen (Moderator)"
+                      >
+                        <RefreshCw className="w-3 h-3" /> Tauschen
+                      </button>
+                    </div>
                   </div>
                   <button 
                     onClick={useJoker}
@@ -487,7 +637,7 @@ export default function App() {
                   {finalQuestion?.category}
                 </span>
                 <h3 className="text-xl md:text-3xl font-bold mb-8 md:mb-12 leading-tight">{finalQuestion?.question}</h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4 text-left max-w-2xl mx-auto mb-8 md:mb-12">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-4 text-left max-w-4xl mx-auto mb-8 md:mb-12">
                   {finalQuestion?.options.map((opt, i) => (
                     <div key={i} className="bg-blue-900/30 p-3 md:p-4 rounded-xl border border-blue-800/50 text-sm md:text-base">
                       <span className="text-yellow-500 font-bold mr-2">{String.fromCharCode(65 + i)}:</span>
@@ -548,8 +698,9 @@ export default function App() {
   );
 }
 
-function TeamSetup({ onStart }: { onStart: (configs: { name: string, difficulty: 'adult' | 'child' }[]) => void }) {
+function TeamSetup({ onStart }: { onStart: (configs: { name: string, difficulty: 'adult' | 'child' }[], hardMode: boolean) => void }) {
   const [teamCount, setTeamCount] = useState(2);
+  const [isHardMode, setIsHardMode] = useState(false);
   const [configs, setConfigs] = useState<{ name: string, difficulty: 'adult' | 'child' }[]>([
     { name: 'Team A', difficulty: 'adult' },
     { name: 'Team B', difficulty: 'adult' },
@@ -611,8 +762,26 @@ function TeamSetup({ onStart }: { onStart: (configs: { name: string, difficulty:
         ))}
       </div>
 
+      <div className="flex items-center justify-between p-4 bg-blue-900/20 border border-blue-800/50 rounded-xl">
+        <div className="flex items-center gap-3">
+          <div className={`p-2 rounded-lg ${isHardMode ? 'bg-red-500/20 text-red-500' : 'bg-blue-500/20 text-blue-500'}`}>
+            <HelpCircle className="w-5 h-5" />
+          </div>
+          <div>
+            <p className="font-bold text-sm">Profi-Modus (Schwer)</p>
+            <p className="text-[10px] text-blue-400 uppercase tracking-wider">Startet direkt mit Level 2 Fragen</p>
+          </div>
+        </div>
+        <button 
+          onClick={() => setIsHardMode(!isHardMode)}
+          className={`w-12 h-6 rounded-full transition-all relative ${isHardMode ? 'bg-red-500' : 'bg-gray-700'}`}
+        >
+          <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${isHardMode ? 'left-7' : 'left-1'}`} />
+        </button>
+      </div>
+
       <button
-        onClick={() => onStart(configs.slice(0, teamCount))}
+        onClick={() => onStart(configs.slice(0, teamCount), isHardMode)}
         className="w-full bg-yellow-500 hover:bg-yellow-400 text-black font-black py-4 md:py-5 rounded-xl shadow-xl shadow-yellow-500/20 transition-all text-lg md:text-xl"
       >
         SPIEL STARTEN
